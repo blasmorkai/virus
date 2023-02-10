@@ -1,7 +1,8 @@
 use cosmwasm_std::{
     entry_point, instantiate2_address, to_binary, Attribute, Binary, CodeInfoResponse,
-    ContractInfoResponse, DepsMut, Env, MessageInfo, Response, StdResult, WasmMsg,
+    ContractInfoResponse, DepsMut, Env, MessageInfo, Response, StdResult, WasmMsg, Addr,
 };
+//use schemars::_serde_json::to_string;
 
 use crate::errors::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg};
@@ -28,11 +29,19 @@ pub fn execute(
             parent_path,
             levels,
         } => execute_spread(deps, env, info, parent_path, levels),
+        ExecuteMsg::Hydra { code_id, salt, msg_instantiate, msg_execute, admin} => execute_hydra(deps, env, info, NewContractInfo { code_id, salt, msg_instantiate, msg_execute, admin}),
     }
 }
 
 /// Basic reproduction number
 const R0: u32 = 2;
+pub struct NewContractInfo {
+    code_id: u64, 
+    salt: String, 
+    msg_instantiate: Binary, 
+    msg_execute: Binary, 
+    admin: Option<String>
+}
 
 pub fn execute_spread(
     deps: DepsMut,
@@ -88,6 +97,56 @@ pub fn execute_spread(
             funds: vec![],
         });
     }
+
+    Ok(Response::new()
+        .add_attributes(attributes)
+        .add_messages(msgs))
+}
+
+pub fn execute_hydra(
+    deps: DepsMut,
+    env: Env,
+    _info: MessageInfo,
+    nci: NewContractInfo,
+) -> Result<Response, ContractError> {
+
+    // validate address and turn Option<addr> to Option<string> as this type is needed for Instantiate2 msg
+    let admin_addr = nci.admin
+    .map(|admin| deps.api.addr_validate(&admin))
+    .transpose()?
+    .map(|addr| Addr::to_string(&addr));
+
+    let creator = deps.api.addr_canonicalize(env.contract.address.as_str())?;
+    let CodeInfoResponse { checksum, .. } = deps.querier.query_wasm_code_info(nci.code_id)?;
+
+    let mut msgs = Vec::<WasmMsg>::new();
+    let mut attributes = Vec::<Attribute>::new();
+
+    let label = format!("Instance {0}", nci.salt);
+    let salt_binary = Binary::from(nci.salt.as_bytes());
+
+    // It will get the address for the new instantiated contract
+    let address = deps
+        .api
+        .addr_humanize(&instantiate2_address(&checksum, &creator, &salt_binary)?)?;
+
+    attributes.push(Attribute::new(format!("Predicted address for code_id ({0}): ", nci.code_id), address.clone()));
+
+    msgs.push(WasmMsg::Instantiate2 {
+        admin: admin_addr,
+        code_id: nci.code_id,
+        label,
+        msg: nci.msg_instantiate,
+        funds: vec![],
+        salt: salt_binary,
+    });
+
+    // we know the address of the newly instantiated contract, so let's execute it right away
+    msgs.push(WasmMsg::Execute {
+        contract_addr: address.into(),
+        msg: nci.msg_execute,
+        funds: vec![],
+    });
 
     Ok(Response::new()
         .add_attributes(attributes)
